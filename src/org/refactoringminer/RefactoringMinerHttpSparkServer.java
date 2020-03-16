@@ -8,7 +8,9 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -17,6 +19,11 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+
 import org.eclipse.jgit.lib.Repository;
 import org.refactoringminer.api.GitHistoryRefactoringMiner;
 import org.refactoringminer.api.GitService;
@@ -24,6 +31,10 @@ import org.refactoringminer.api.Refactoring;
 import org.refactoringminer.api.RefactoringHandler;
 import org.refactoringminer.rm1.GitHistoryRefactoringMinerImpl;
 import org.refactoringminer.util.GitServiceImpl;
+
+import gr.uom.java.xmi.UMLModel;
+import gr.uom.java.xmi.UMLModelASTReader;
+import gr.uom.java.xmi.diff.UMLModelDiff;
 
 // import com.sun.net.httpserver.Headers;
 // import com.sun.net.httpserver.HttpExchange;
@@ -34,6 +45,12 @@ import static spark.Spark.*;
 public class RefactoringMinerHttpSparkServer {
 
 	public static void main(String[] args) throws Exception {
+		Set<String> validOrigins = new HashSet<String>();
+		validOrigins.add("http://127.0.0.1:8080");
+		validOrigins.add("http://localhost:8080");
+		validOrigins.add("http://127.0.0.1:8081");
+		validOrigins.add("http://localhost:8081");
+		validOrigins.add("http://131.254.17.96:8080");
 		Properties prop = new Properties();
 		InputStream input = new FileInputStream("server.properties");
 		prop.load(input);
@@ -45,6 +62,58 @@ public class RefactoringMinerHttpSparkServer {
 		List<Refactoring> detectedRefactorings = new ArrayList<Refactoring>();
 
 		GitHistoryRefactoringMiner miner = new GitHistoryRefactoringMinerImpl();
+		options("/RefactoringMiner", (req, res) -> {
+			System.out.println("====options=====RefactoringMiner=========");
+			System.out.println(req.headers("Origin"));
+			res.header("Content-Type", "application/json");
+			if (validOrigins.contains(req.headers("Origin"))) {
+				res.header("Access-Control-Allow-Origin", req.headers("Origin"));
+			}
+			res.header("Access-Control-Allow-Credentials", "true");
+			res.header("Access-Control-Allow-Methods", "OPTIONS,PUT,GET");
+			res.header("Access-Control-Allow-Headers", "Origin, Access-Control-Allow-Origin, Access-Control-Allow-Credentials");
+			return "";
+		});
+		put("/RefactoringMiner", (req, res) -> {
+			System.out.println("=========spoon=========");
+			System.out.println(req.headers("Origin"));
+			res.header("Content-Type", "application/json");
+			if (validOrigins.contains(req.headers("Origin"))) {
+				res.header("Access-Control-Allow-Origin", req.headers("Origin"));
+			}
+			// res.header("Access-Control-Allow-Origin", "*");
+			res.header("Access-Control-Allow-Credentials", "true");
+			res.header("Access-Control-Allow-Methods", "OPTIONS,PUT,GET");
+
+			String[] vals = req.body().split("\n", 2);
+
+			Map<String,String> files1 = new HashMap<String,String>();
+			files1.put("", new String(Base64.getDecoder().decode(vals[0])));
+			Set<String> dirs1 =  new HashSet<String>();
+			Map<String,String> files2 = new HashMap<String,String>();
+			files2.put("", new String(Base64.getDecoder().decode(vals[1])));
+			Set<String> dirs2 =  new HashSet<String>();
+
+			UMLModel model1 = new UMLModelASTReader(files1, dirs1).getUmlModel();
+			UMLModel model2 = new UMLModelASTReader(files2, dirs2).getUmlModel();
+			UMLModelDiff modelDiff = model1.diff(model2);
+			List<Refactoring> refactorings = modelDiff.getRefactorings();
+			System.out.println(refactorings);
+			String response = JSON("https://github.com/aaa/aaa.git", "none", refactorings);
+			return response;
+			// SimpleModule module = new SimpleModule();
+			// ObjectMapper mapper = new ObjectMapper();
+			// try {
+			// 	return mapper.registerModule(module)
+			// 	.writer(new DefaultPrettyPrinter())
+			// 	.writeValueAsString(refactorings);
+			// } catch (JsonProcessingException e) {
+			// 	// TODO Auto-generated catch block
+			// 	e.printStackTrace();
+			// }
+			// return "";
+
+		});
 		get("/RefactoringMiner", (req, res) -> {
 			System.out.println("=========RefactoringMiner=========");
 			res.header("Content-Type", "application/json");
@@ -57,14 +126,26 @@ public class RefactoringMinerHttpSparkServer {
 			if (params.contains("commitId")) {
 				String commitId = req.queryParams("commitId");
 					
-				miner.detectAtCommit(gitURL, commitId, new RefactoringHandler() {
-					@Override
-					public void handle(String commitId, List<Refactoring> refactorings) {
-						detectedRefactorings.addAll(refactorings);
-					}
-				}, timeout);
-
+				System.out.println(0);
+				try {
+					miner.detectAtCommit(gitURL, commitId, new RefactoringHandler() {
+						@Override
+						public void handle(String commitId, List<Refactoring> refactorings) {
+							detectedRefactorings.addAll(refactorings);
+						}
+					}, timeout);
+				} catch (Exception e) {
+					System.err.println(e.getMessage());
+					e.printStackTrace();
+				}
+				System.out.println(1);
+				System.out.println(detectedRefactorings);
+				System.out.println(detectedRefactorings.size());
+				if (detectedRefactorings.size()<1) {
+					return "{}";
+				} 
 				String response = JSON(gitURL, commitId, detectedRefactorings);
+				System.out.println(2);
 				System.out.println(response);
 				return response;
 			} else if (params.contains("start") && params.contains("end")) {
@@ -129,7 +210,7 @@ public class RefactoringMinerHttpSparkServer {
 					}
 				});
 
-				String response = JSON(gitURL, "aaa", detectedRefactorings);
+				String response = JSON(gitURL, "master", detectedRefactorings);
 				System.out.println(response);
 				return response;
 			}
@@ -148,6 +229,14 @@ public class RefactoringMinerHttpSparkServer {
 			// os.write(response.getBytes());
 			// os.close();
 
+		});
+		exception(Exception.class, (exception, request, response) -> {
+			// Handle the exception here
+			System.out.println("Exception");
+			System.out.println(exception.getMessage());
+			System.out.println(request);
+			System.out.println(response);
+			response.status(400);
 		});
 
 		// InetSocketAddress inetSocketAddress = new InetSocketAddress(InetAddress.getByName(hostName), port);
@@ -204,7 +293,7 @@ public class RefactoringMinerHttpSparkServer {
 		return result;
 	}
 
-	private static String JSON(String gitURL, String currentCommitId, List<Refactoring> refactoringsAtRevision) {
+	public static String JSON(String gitURL, String currentCommitId, List<Refactoring> refactoringsAtRevision) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("{").append("\n");
 		sb.append("\"").append("commits").append("\"").append(": ");
