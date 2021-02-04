@@ -194,6 +194,42 @@ public class GitHistoryRefactoringMinerImpl implements GitHistoryRefactoringMine
 		return refactoringsAtRevision;
 	}
 
+	protected List<Refactoring> detectRefactorings(GitService gitService, Repository repository, final RefactoringHandler handler, File projectFolder, RevCommit beforeCommit, RevCommit currentCommit) throws Exception {
+		List<Refactoring> refactoringsAtRevision;
+		String commitId = currentCommit.getId().getName();
+		List<String> filePathsBefore = new ArrayList<String>();
+		List<String> filePathsCurrent = new ArrayList<String>();
+		Map<String, String> renamedFilesHint = new HashMap<String, String>();
+		((GitServiceImpl)gitService).fileTreeDiff(repository, beforeCommit, currentCommit, filePathsBefore, filePathsCurrent, renamedFilesHint);
+		
+		Set<String> repositoryDirectoriesBefore = new LinkedHashSet<String>();
+		Set<String> repositoryDirectoriesCurrent = new LinkedHashSet<String>();
+		Map<String, String> fileContentsBefore = new LinkedHashMap<String, String>();
+		Map<String, String> fileContentsCurrent = new LinkedHashMap<String, String>();
+		try (RevWalk walk = new RevWalk(repository)) {
+			// If no java files changed, there is no refactoring. Also, if there are
+			// only ADD's or only REMOVE's there is no refactoring
+			if (!filePathsBefore.isEmpty() && !filePathsCurrent.isEmpty() && currentCommit.getParentCount() > 0) {
+				RevCommit parentCommit = beforeCommit;
+				populateFileContents(repository, parentCommit, filePathsBefore, fileContentsBefore, repositoryDirectoriesBefore);
+				UMLModel parentUMLModel = createModel(fileContentsBefore, repositoryDirectoriesBefore);
+
+				populateFileContents(repository, currentCommit, filePathsCurrent, fileContentsCurrent, repositoryDirectoriesCurrent);
+				UMLModel currentUMLModel = createModel(fileContentsCurrent, repositoryDirectoriesCurrent);
+				
+				refactoringsAtRevision = parentUMLModel.diff(currentUMLModel, renamedFilesHint).getRefactorings();
+				refactoringsAtRevision = filter(refactoringsAtRevision);
+			} else {
+				//logger.info(String.format("Ignored revision %s with no changes in java files", commitId));
+				refactoringsAtRevision = Collections.emptyList();
+			}
+			handler.handle(commitId, refactoringsAtRevision);
+			
+			walk.dispose();
+		}
+		return refactoringsAtRevision;
+	}
+
 	private void populateFileContents(Repository repository, RevCommit commit,
 			List<String> filePaths, Map<String, String> fileContents, Set<String> repositoryDirectories) throws Exception {
 		logger.info("Processing {} {} ...", repository.getDirectory().getParent().toString(), commit.getName());
@@ -735,5 +771,59 @@ public class GitHistoryRefactoringMinerImpl implements GitHistoryRefactoringMine
 		for(GHPullRequestCommitDetail commit : commits) {
 			detectAtCommit(cloneURL, commit.getSha(), handler, timeout);
 		}
+	}
+	
+	private void detect(GitService gitService, Repository repository, final RefactoringHandler handler, RevCommit beforeCommit, RevCommit currentCommit) {
+		int commitsCount = 0;
+		int errorCommitsCount = 0;
+		int refactoringsCount = 0;
+
+		File metadataFolder = repository.getDirectory();
+		File projectFolder = metadataFolder.getParentFile();
+		String projectName = projectFolder.getName();
+		
+		long time = System.currentTimeMillis();
+		try {
+			List<Refactoring> refactoringsAtRevision = detectRefactorings(gitService, repository, handler, projectFolder, beforeCommit, currentCommit);
+			refactoringsCount += refactoringsAtRevision.size();
+		} catch (Exception e) {
+			logger.warn(String.format("Ignored revision %s due to error", currentCommit.getId().getName()), e);
+			handler.handleException(currentCommit.getId().getName(),e);
+			errorCommitsCount++;
+		}
+
+		commitsCount++;
+		long time2 = System.currentTimeMillis();
+		if ((time2 - time) > 20000) {
+			time = time2;
+			logger.info(String.format("Processing %s [Commits: %d, Errors: %d, Refactorings: %d]", projectName, commitsCount, errorCommitsCount, refactoringsCount));
+		}
+
+		handler.onFinish(refactoringsCount, commitsCount, errorCommitsCount);
+		logger.info(String.format("Analyzed %s [Commits: %d, Errors: %d, Refactorings: %d]", projectName, commitsCount, errorCommitsCount, refactoringsCount));
+	}
+	public void detectBetweenCommitsOnce(Repository repository, String startCommitId, String endCommitId,
+			RefactoringHandler handler) throws Exception {
+		GitService gitService = new GitServiceImpl() {
+			@Override
+			public boolean isCommitAnalyzed(String sha1) {
+				return handler.skipCommit(sha1);
+			}
+		};
+		
+		Iterable<RevCommit> walk = gitService.createRevsWalkBetweenCommits(repository, startCommitId, endCommitId);
+		Iterator<RevCommit> iterator = walk.iterator();
+		if (!iterator.hasNext()) {
+			return;
+		}
+		RevCommit beforeCommit = iterator.next();
+		RevCommit currentCommit = null;
+		while (iterator.hasNext()) {
+			currentCommit = iterator.next();
+		}
+		if (currentCommit == null) {
+			return;
+		}
+		detect(gitService, repository, handler, beforeCommit, currentCommit);
 	}
 }
